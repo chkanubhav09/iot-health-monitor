@@ -1,0 +1,159 @@
+# .github/workflows/ci.yml
+# CI/CD pipeline: lint -> test -> train ML -> Terraform plan -> deploy
+
+name: CI / CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+  TF_VERSION:     "1.7.5"
+  AWS_REGION:     "ap-south-1"
+
+jobs:
+  # ── 1. Lint & Format ────────────────────────────────────────────────────────
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install linting tools
+        run: pip install flake8 black
+
+      - name: Black format check
+        run: black --check backend/ ml/
+
+      - name: Flake8 lint
+        run: flake8 backend/ ml/ --max-line-length=100 --ignore=E501,W503
+
+  # ── 2. Unit Tests ───────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run pytest
+        run: pytest tests/ -v --tb=short
+        env:
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+
+  # ── 3. Train ML Model ───────────────────────────────────────────────────────
+  train:
+    name: Train Isolation Forest
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install ML dependencies
+        run: pip install scikit-learn pandas numpy boto3
+
+      - name: Train model
+        run: python ml/train.py --data ml/data/sample_vitals.csv
+
+      - name: Upload model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: isolation-forest-model
+          path: ml/model.pkl
+          retention-days: 30
+
+  # ── 4. Terraform Plan ───────────────────────────────────────────────────────
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: train
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        working-directory: infra
+        run: terraform validate
+
+      - name: Terraform Plan
+        working-directory: infra
+        run: terraform plan -var="alert_email=noop@example.com" -var="model_bucket=noop"
+        continue-on-error: true
+
+  # ── 5. Deploy (main branch only) ────────────────────────────────────────────
+  deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    needs: train
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Download model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: isolation-forest-model
+          path: ml/
+
+      - name: Upload model to S3
+        run: |
+          aws s3 cp ml/model.pkl s3://${{ secrets.MODEL_BUCKET }}/models/isolation_forest.pkl
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: infra
+        run: |
+          terraform apply -auto-approve \
+            -var="alert_email=${{ secrets.ALERT_EMAIL }}" \
+            -var="model_bucket=${{ secrets.MODEL_BUCKET }}"
