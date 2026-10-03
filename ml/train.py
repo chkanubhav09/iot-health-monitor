@@ -16,9 +16,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 
-DATA_PATH   = pathlib.Path(__file__).parent / "data" / "sample_vitals.csv"
-MODEL_PATH  = pathlib.Path(__file__).parent / "model.pkl"
-FEATURES    = ["heart_rate", "spo2", "temperature", "ecg_raw"]
+DATA_PATH = pathlib.Path(__file__).parent / "data" / "sample_vitals.csv"
+MODEL_PATH = pathlib.Path(__file__).parent / "model.pkl"
+FEATURES = ["heart_rate", "spo2", "temperature", "ecg_raw"]
 CONTAMINATION = 0.05  # ~5% of training data are anomalies
 
 
@@ -29,27 +29,40 @@ def load_data(path: pathlib.Path) -> pd.DataFrame:
 
 
 def build_pipeline(contamination: float = CONTAMINATION) -> Pipeline:
-    return Pipeline([
-        ("scaler", StandardScaler()),
-        ("iso_forest", IsolationForest(
-            n_estimators=200,
-            contamination=contamination,
-            max_features=len(FEATURES),
-            random_state=42,
-            n_jobs=-1,
-        )),
-    ])
+    return Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            (
+                "iso_forest",
+                IsolationForest(
+                    n_estimators=200,
+                    contamination=contamination,
+                    max_features=len(FEATURES),
+                    random_state=42,
+                    n_jobs=-1,
+                ),
+            ),
+        ]
+    )
 
 
 def evaluate(model, X_test, y_test):
     """y_test: 1 = normal, -1 = anomaly (Isolation Forest convention)."""
     preds = model.predict(X_test)
     # Convert to binary: 1 = anomaly, 0 = normal  (for standard metrics)
-    y_bin   = (y_test  == -1).astype(int)
-    p_bin   = (preds   == -1).astype(int)
+    y_bin = (y_test == -1).astype(int)
+    p_bin = (preds == -1).astype(int)
     f1 = f1_score(y_bin, p_bin, zero_division=0)
     print("\nClassification Report:")
-    print(classification_report(y_bin, p_bin, labels=[0, 1], target_names=["normal", "anomaly"], zero_division=0))
+    print(
+        classification_report(
+            y_bin,
+            p_bin,
+            labels=[0, 1],
+            target_names=["normal", "anomaly"],
+            zero_division=0,
+        )
+    )
     print(f"F1 Score (anomaly class): {f1:.4f}")
     return f1
 
@@ -61,15 +74,17 @@ def upload_to_s3(model_path: pathlib.Path, bucket: str, key: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Isolation Forest on vitals data")
-    parser.add_argument("--data",          default=str(DATA_PATH))
+    parser = argparse.ArgumentParser(
+        description="Train Isolation Forest on vitals data"
+    )
+    parser.add_argument("--data", default=str(DATA_PATH))
     parser.add_argument("--contamination", type=float, default=CONTAMINATION)
-    parser.add_argument("--s3-bucket",     default=os.getenv("MODEL_BUCKET", ""))
-    parser.add_argument("--s3-key",        default="models/isolation_forest.pkl")
+    parser.add_argument("--s3-bucket", default=os.getenv("MODEL_BUCKET", ""))
+    parser.add_argument("--s3-key", default="models/isolation_forest.pkl")
     args = parser.parse_args()
 
     df = load_data(pathlib.Path(args.data))
-    X  = df[FEATURES].values
+    X = df[FEATURES].values
 
     # Synthetic labels: rows flagged as anomaly in CSV column (if present)
     if "label" in df.columns:
