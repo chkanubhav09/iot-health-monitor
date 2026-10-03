@@ -49,7 +49,7 @@ def evaluate(model, X_test, y_test):
     p_bin   = (preds   == -1).astype(int)
     f1 = f1_score(y_bin, p_bin, zero_division=0)
     print("\nClassification Report:")
-    print(classification_report(y_bin, p_bin, target_names=["normal", "anomaly"]))
+    print(classification_report(y_bin, p_bin, labels=[0, 1], target_names=["normal", "anomaly"], zero_division=0))
     print(f"F1 Score (anomaly class): {f1:.4f}")
     return f1
 
