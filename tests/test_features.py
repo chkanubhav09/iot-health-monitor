@@ -19,7 +19,9 @@ def _load(path):
 
 def test_extract_features_order_and_defaults():
     mod = _load("backend/anomaly_detector/handler.py")
-    out = mod.extract_features({"heart_rate": 80, "spo2": 97, "temperature": 37.0, "ecg_raw": 2100})
+    out = mod.extract_features(
+        {"heart_rate": 80, "spo2": 97, "temperature": 37.0, "ecg_raw": 2100}
+    )
     assert out.shape == (1, 4)
     assert out[0].tolist() == [80.0, 97.0, 37.0, 2100.0]
     default = mod.extract_features({})
