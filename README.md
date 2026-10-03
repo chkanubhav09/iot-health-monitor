@@ -1,167 +1,105 @@
-# 🫀 IoT Health Monitor
+# IoT Health Monitor
 
-![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python) ![MicroPython](https://img.shields.io/badge/MicroPython-ESP32-green) ![AWS](https://img.shields.io/badge/AWS-IoT%20Core%20%7C%20Lambda%20%7C%20DynamoDB-orange?logo=amazonaws) ![Terraform](https://img.shields.io/badge/IaC-Terraform-purple?logo=terraform) ![License](https://img.shields.io/badge/License-MIT-yellow)
+ESP32 (MicroPython) vitals node + AWS serverless pipeline with ML anomaly detection.
 
-> **Real-time health monitoring system** — ESP32 firmware collects ECG, SpO₂, and temperature data every 500 ms, publishes over MQTT/TLS to AWS IoT Core, runs a serverless validation + ML anomaly detection pipeline, and triggers SNS alerts when vitals are abnormal.
+![MicroPython](https://img.shields.io/badge/MicroPython-ESP32-green) ![Python](https://img.shields.io/badge/Python-3.11-blue) ![AWS](https://img.shields.io/badge/AWS-IoT%20Core%20%7C%20Lambda%20%7C%20DynamoDB%20%7C%20SNS-orange) ![Terraform](https://img.shields.io/badge/IaC-Terraform-purple) ![License](https://img.shields.io/badge/License-MIT-yellow)
 
----
+An ESP32 reads ECG, pulse/SpO2 and body temperature, publishes JSON over MQTT/TLS to AWS IoT Core, and a serverless backend validates and stores each reading and runs an Isolation Forest model that sends an SNS alert on anomalous vitals.
+
+I built this as a learning project to connect embedded sensing with cloud and ML in one end-to-end design.
+
+## Status (read this first)
+
+- The firmware, Lambda functions, Terraform and CI are all in this repo and written end to end.
+- The training data in `ml/data/sample_vitals.csv` is a **small synthetic set (30 rows, only 2 labelled anomalies)**, not real patient data. The F1 printed by `ml/train.py` is not a meaningful accuracy figure on this data.
+- The SpO2 and heart-rate calculations in `firmware/sensors.py` are **simplified estimates** from raw MAX30100 readings. They are not calibrated and this is **not a medical device**.
+- `battery_pct` in the payload is a placeholder value.
+- No latency or accuracy benchmarks are claimed here.
 
 ## Architecture
 
 ```
-[ESP32 + AD8232 + MAX30100 + DS18B20]
-          |
-       MQTT/TLS (port 8883)
-          |
-    [AWS IoT Core]
-          |
-     Topic Rule
-    /          \
-[Lambda]     [Lambda]
-Validator  Anomaly Detector
-    |              |
-[DynamoDB]      [SNS Alert]
-    |
-[Grafana / QuickSight Dashboard]
+[ESP32 + AD8232 + MAX30100 + DS18B20 + SSD1306 OLED]
+                  |
+          MQTT over TLS (8883)
+                  |
+            [AWS IoT Core]
+                  |
+              Topic Rule
+             /          \
+   [Lambda: validator]  [Lambda: anomaly detector]
+            |                     |
+        [DynamoDB]            [SNS alert]
 ```
 
----
+## Hardware
 
-## Features
-
-- **Embedded firmware** in MicroPython for ESP32 — reads ECG (AD8232), SpO₂/HR (MAX30100), body temperature (DS18B20), and displays live vitals on an OLED
-- **AWS IoT Core** ingestion with mutual TLS authentication (X.509 device certificates)
-- **Serverless pipeline**: Lambda validates schema → stores in DynamoDB → Isolation Forest ML model detects anomalies → SNS email/SMS alert
-- **Terraform IaC** for reproducible cloud infrastructure — IoT Thing, Policy, Topic Rule, DynamoDB table, Lambda functions
-- **CI/CD** via GitHub Actions — lint, test, train ML model, Terraform plan/apply on every push
-- **Clinical alert thresholds**: SpO₂ < 90%, HR < 50 or > 120 bpm, Temp > 38.5°C
-
----
-
-## Hardware Requirements
-
-| Component | Purpose | Notes |
+| Component | Purpose | Interface |
 |---|---|---|
-| ESP32 (38-pin) | Microcontroller | Wi-Fi + MQTT |
-| AD8232 | ECG signal acquisition | 3-lead, 1-lead |
-| MAX30100 | SpO₂ + Heart Rate | I2C |
-| DS18B20 | Body temperature | OneWire, waterproof |
-| SSD1306 OLED (0.96") | Local display | I2C |
+| ESP32 (38-pin) | Microcontroller, Wi-Fi | - |
+| AD8232 | ECG front end | ADC pin 34 |
+| MAX30100 | Pulse and SpO2 | I2C (SDA 21, SCL 22) |
+| DS18B20 | Body temperature | OneWire pin 4 |
+| SSD1306 0.96" OLED | Local readout | I2C (SDA 21, SCL 22) |
 
----
+## What each part does
 
-## Project Structure
+- `firmware/` - MicroPython: reads the sensors every ~500 ms, publishes JSON to `health/<device_id>/vitals`, shows HR / SpO2 / temperature on the OLED, reconnects on connection errors.
+- `backend/vitals_validator/` - Lambda: checks the payload schema and writes to DynamoDB (with TTL).
+- `backend/anomaly_detector/` - Lambda: loads the model from S3, scores each reading, publishes an SNS alert if flagged.
+- `ml/train.py` - trains a scikit-learn pipeline (StandardScaler + Isolation Forest) on `heart_rate`, `spo2`, `temperature`, `ecg_raw`, prints a classification report, optionally uploads the model to S3.
+- `infra/` - Terraform for the IoT Thing, policy and topic rule, DynamoDB table, Lambdas, IAM and the SNS topic.
+- `.github/workflows/ci.yml` - lint, tests, model training, `terraform validate`/plan on PRs, deploy on main.
 
-```
-iot-health-monitor/
-├── firmware/
-│   ├── main.py          # MQTT publish loop, 500ms interval
-│   ├── sensors.py       # AD8232, MAX30100, DS18B20, OLED drivers
-│   └── config.py        # Wi-Fi / AWS endpoint config template
-├── backend/
-│   ├── vitals_validator/
-│   │   └── handler.py   # Lambda: schema validation → DynamoDB
-│   ├── anomaly_detector/
-│   │   └── handler.py   # Lambda: Isolation Forest → SNS alerts
-│   └── requirements.txt
-├── ml/
-│   ├── train.py         # Isolation Forest training pipeline
-│   └── data/
-│       └── sample_vitals.csv  # 2000-row synthetic dataset
-├── infra/
-│   ├── main.tf          # Terraform provider & variables
-│   ├── dynamodb.tf      # DynamoDB table with TTL + Streams
-│   └── iot.tf           # IoT Thing, Policy, Topic Rule
-├── .github/
-│   └── workflows/
-│       └── ci.yml       # CI/CD: lint → test → train → deploy
-└── README.md
-```
-
----
-
-## Quick Start
-
-### 1. Clone the repo
-```bash
-git clone https://github.com/chkanubhav09/iot-health-monitor.git
-cd iot-health-monitor
-```
-
-### 2. Flash firmware to ESP32
-```bash
-# Install esptool and ampy
-pip install esptool adafruit-ampy
-
-# Copy config template and fill in your credentials
-cp firmware/config.py.template firmware/config.py
-
-# Flash MicroPython firmware
-esptool.py --port /dev/ttyUSB0 erase_flash
-esptool.py --port /dev/ttyUSB0 write_flash -z 0x1000 micropython.bin
-
-# Upload source files
-ampy --port /dev/ttyUSB0 put firmware/config.py
-ampy --port /dev/ttyUSB0 put firmware/sensors.py
-ampy --port /dev/ttyUSB0 put firmware/main.py
-```
-
-### 3. Deploy AWS infrastructure
-```bash
-cd infra
-terraform init
-terraform plan
-terraform apply
-```
-
-### 4. Train and deploy ML model
-```bash
-cd ml
-pip install -r ../backend/requirements.txt
-python train.py
-# Uploads model.pkl to S3 automatically
-```
-
----
-
-## Performance Metrics
-
-| Metric | Value |
-|---|---|
-| Sensor sampling rate | 500 ms |
-| MQTT publish latency | ~120 ms avg |
-| End-to-end pipeline latency | < 800 ms |
-| Anomaly detection F1 score | 0.91 |
-| DynamoDB write capacity | 2 reads/sec sustained |
-| Lambda cold start | ~400 ms |
-
----
-
-## MQTT Payload Schema
+## MQTT payload
 
 ```json
 {
   "device_id": "esp32-patient-01",
+  "seq": 0,
   "timestamp": 1712000000,
   "ecg_raw": 2048,
   "heart_rate": 72,
-  "spo2": 98.5,
+  "spo2": 98,
   "temperature": 36.8,
   "battery_pct": 85
 }
 ```
 
----
+## Setup
 
-## Resume Bullet Points
+1. Clone the repo.
+2. Edit `firmware/config.py` with your Wi-Fi details, AWS IoT endpoint and certificate paths. Never commit real credentials or certificates (`certs/` is git-ignored).
+3. Flash MicroPython to the ESP32, then copy the firmware files with `ampy`:
+   ```bash
+   pip install esptool adafruit-ampy
+   esptool.py --port /dev/ttyUSB0 erase_flash
+   esptool.py --port /dev/ttyUSB0 write_flash -z 0x1000 <micropython.bin>
+   ampy --port /dev/ttyUSB0 put firmware/config.py
+   ampy --port /dev/ttyUSB0 put firmware/sensors.py
+   ampy --port /dev/ttyUSB0 put firmware/main.py
+   ```
+   The OLED needs the `ssd1306` MicroPython module on the board.
+4. Deploy the cloud side:
+   ```bash
+   cd infra
+   terraform init
+   terraform apply -var="alert_email=you@example.com" -var="model_bucket=<your-bucket>"
+   ```
+5. Train the model and upload it:
+   ```bash
+   pip install -r backend/requirements.txt
+   python ml/train.py --s3-bucket <your-bucket>
+   ```
 
-- Built a real-time IoT health monitoring system using **ESP32 + AD8232 ECG + MAX30100** publishing vitals over **MQTT/TLS** to **AWS IoT Core** at 500 ms intervals
-- Designed a **serverless AWS pipeline** (Lambda → DynamoDB → SNS) processing sensor readings with < 800 ms end-to-end latency
-- Trained an **Isolation Forest** anomaly detector (F1: 0.91) deployed as a Lambda function to alert on abnormal ECG, SpO₂, and temperature readings
-- Wrote **Terraform IaC** for all AWS resources and a **GitHub Actions CI/CD** pipeline covering testing, model training, and automated cloud deployment
+## Known gaps / next steps
 
----
+- Replace the estimated HR/SpO2 maths with a proper MAX30100 driver and calibration.
+- Train on properly collected, labelled data instead of the synthetic sample.
+- Add unit tests (the CI test job expects a `tests/` folder).
+- Read battery voltage from an ADC instead of the placeholder.
+- Add a dashboard on top of DynamoDB.
 
 ## License
 
-MIT © 2026 [chkanubhav09](https://github.com/chkanubhav09)
+MIT, see [LICENSE](LICENSE).
